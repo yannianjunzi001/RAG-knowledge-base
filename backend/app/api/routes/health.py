@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from starlette.routing import Router
 
-from app.core.api.deps import DbSession
+from app.api.deps import DbSession
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.storage.cos_client import get_cos_client

@@ -3,11 +3,10 @@ from fastapi import FastAPI
 import fastapi
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.api.error_handlers import register_error_handlers
-from app.core.api.routes import health
+from app.api.error_handlers import register_error_handlers
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
-
+from app.api.routes import documents,health
 
 def create_app() ->FastAPI:
     configure_logging()
@@ -25,6 +24,8 @@ def create_app() ->FastAPI:
 
     register_error_handlers(app)
     app.include_router(health.router, prefix="/api")
+
+    app.include_router(documents.router, prefix="/api")
 
     logger.info("app initialized: %s",settings.app_name)
     return app

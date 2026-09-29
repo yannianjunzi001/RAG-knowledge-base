@@ -31,7 +31,20 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) ->list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
-        
+    
+    #===== Embedding (DashScope OpenAI 兼容协议)====
+    embedding_api_key: str =""
+    embedding_base_url: str="https://ws-y8vb8dfjw3weszez.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    embedding_model: str ="text-embedding-v3"
+    #维度需与 alembic 迁移中 Vector(N) 保持一致：改维度需要重建表
+    embedding_dim:  int =1024
+    embedding_batch_size: int =10
+
+    #====文档的上传与切分====
+    upload_max_size_mb: int =50
+    chunk_size: int =600
+    chunk_overlap: int =60
+    
 
 
 @lru_cache(maxsize=1)

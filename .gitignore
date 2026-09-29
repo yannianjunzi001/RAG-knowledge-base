@@ -118,3 +118,6 @@ celerybeat.pid
 
 # Alembic 本地配置（如有）
 alembic.ini.local
+
+# 敲代码的记录
+新建文件夹/
