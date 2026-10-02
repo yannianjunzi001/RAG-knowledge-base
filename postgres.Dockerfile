@@ -2,7 +2,11 @@
 FROM postgres:16-bookworm AS builder
 
 ARG PG_MAJOR=16
-RUN apt-get update \
+RUN sed -i \
+    -e 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' \
+    -e 's|http://apt.postgresql.org/pub/repos/apt|https://mirrors.tuna.tsinghua.edu.cn/postgresql/repos/apt/|g' \
+    /etc/apt/sources.list.d/* \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
@@ -10,7 +14,7 @@ RUN apt-get update \
         git \
         postgresql-server-dev-${PG_MAJOR} \
     && rm -rf /var/lib/apt/lists/*
-
+    
 # 编译安装 SCWS（zhparser 的底层中文分词库）
 RUN curl -fsSL http://www.xunsearch.com/scws/down/scws-1.2.3.tar.bz2 -o /tmp/scws.tar.bz2 \
     && mkdir -p /tmp/scws \
