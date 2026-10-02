@@ -15,6 +15,7 @@ from app.workflows.nodes import (
     normalize_query,
     retrieve,
     stream_generate,
+    route_query,
 )
 from app.workflows.rag_state import RAGState
 
@@ -97,6 +98,7 @@ class ChatService:
                 # 1. 加载上下文（仅历史消息，本轮 user 此刻尚未入库）+ 改写查询
                 state.update(await load_context(state, session))
                 state.update(await normalize_query(state))
+                state.update(await route_query(state)) 
 
                 # 2. user 消息落库
                 await self._persist_user_message(state, session)
@@ -104,6 +106,12 @@ class ChatService:
                 yield {
                     "event": "message_start",
                     "data": {"user_message_id": str(state["user_message_id"])},
+                }
+
+                # 3. 把 query 路由结果推给前端调试面板（始终发送，前端按 route 选择渲染）
+                yield {
+                    "event": "query_route",
+                    "data": _build_query_route_payload(state),
                 }
 
                 # 3. retrieve（含拒答判定）-> 先把引用发给前端，让参考资料面板立刻可见
@@ -178,8 +186,13 @@ class ChatService:
         assistant_msg = ConversationRepository.make_assistant_message(
             state["conversation_id"],
             content=state["answer"],
-            extra_metadata={"refused": bool(state.get("refused"))},
+
+            extra_metadata={
+                "refused": bool(state.get("refused")),
+                "query_route": _build_query_route_payload(state),
+                },
         )
+
         await conv_repo.add_messages([assistant_msg])
 
         if not state.get("refused"):
@@ -201,3 +214,16 @@ class ChatService:
 
         await session.commit()
         state["assistant_message_id"] = assistant_msg.id
+
+def _build_query_route_payload(state: RAGState) -> dict:
+    """SSE / metadata 共用的 query_route 载荷格式。
+
+    始终携带 4 个可选字段（None 也保留），前端可据此判断展示哪种调试面板。
+    """
+    return {
+        "route": state.get("route", "original"),
+        "query": state.get("query", ""),
+        "rewritten_query": state.get("rewritten_query"),
+        "hyde_answer": state.get("hyde_answer"),
+        "multi_queries": state.get("multi_queries"),
+    }
