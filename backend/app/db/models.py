@@ -29,13 +29,14 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     DateTime,
+    Computed,
     ForeignKey,
     Integer,
     String,
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB,TSVECTOR, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.config import settings
@@ -104,6 +105,16 @@ class DocumentChunk(Base):
     extra_metadata: Mapped[dict] = mapped_column(
         "metadata", JSONB, nullable=False, default=dict
     )
+
+    # 中文全文检索索引列。
+    # GENERATED ALWAYS 由 PostgreSQL 根据 content 自动维护，应用层不写、只读。
+    # SQLAlchemy 看到 Computed(persisted=True) 会自动从 INSERT/UPDATE 中排除该列。
+    content_tsv: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('chinese_zh', content)", persisted=True),
+        nullable=False,
+    )
+
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -208,3 +219,5 @@ class AnswerCitation(Base):
     quote: Mapped[str] = mapped_column(Text, nullable=False)
 
     message: Mapped[Message] = relationship(back_populates="citations")
+
+    retrieval_meta: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
