@@ -33,6 +33,10 @@ class RetrievedChunk:
     keyword_score: float | None = None    # 原始 ts_rank
     rrf_score: float | None = None        # RRF 融合分
 
+    # reranker query-chunk 成对打分的相关度，越大越相关
+    # qwen3-rerank 输出 relevance_score ∈ [0, 1]
+    rerank_score: float | None = None
+
 
 class VectorRetriever:
     def __init__(self, session: AsyncSession) -> None:

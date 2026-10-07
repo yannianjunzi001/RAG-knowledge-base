@@ -1,17 +1,16 @@
-"""retrieve: 执行向量 Top-K 检索，并判断是否触发拒答。
+"""retrieve: 混合检索，只负责召回 Top-K 候选。
 
-multi_query 路径下每条子查询独立走 hybrid 检索，再合并去重；其他路径走单路。
+拒答逻辑已搬到 refuse 节点；判定逻辑搬到 judge_context 节点；
+本节点现在只负责"召回尽量多的候选"，交给下游 rerank 精排。
 """
 from app.core.config import settings
-from app.llm.prompts import REFUSAL_ANSWER
-from app.retrieval.vector_retriever import VectorRetriever,RetrievedChunk
+from app.retrieval.vector_retriever import RetrievedChunk
 from app.workflows.rag_state import RAGState
 from app.retrieval.hybrid_retriever import HybridRetriever
 
 async def retrieve(state: RAGState) -> RAGState:
     retriever = HybridRetriever()
     recall_top_k = settings.retrieval_recall_top_k
-    final_top_k = settings.retrieval_top_k
 
     if state.get("route") == "multi_query" and state.get("multi_queries"):
         # 各子查询独立走 hybrid 检索，再合并；不做嵌套 RRF
@@ -21,34 +20,18 @@ async def retrieve(state: RAGState) -> RAGState:
                 await retriever.search(
                     sub_query,
                     recall_top_k=recall_top_k,
-                    final_top_k=final_top_k,
+                    final_top_k=recall_top_k,
                 )
             )
-        chunks = _merge_chunks(bundles, top_k=final_top_k)
+        chunks = _merge_chunks(bundles, top_k=recall_top_k,)
     else:
         chunks = await retriever.search(
             state["query"],
             recall_top_k=recall_top_k,
-            final_top_k=final_top_k,
+            final_top_k=recall_top_k,
         )
     
-    refused = _should_refuse(chunks)
-    update: RAGState = {
-        "retrieved_chunks": chunks,
-        "refused": refused,
-    }
-    if refused:
-        update["answer"] = REFUSAL_ANSWER
-    return update
-
-def _should_refuse(chunks: list[RetrievedChunk]) -> bool:
-    """混合检索后的拒答判定，仅看 Top1 的语义相关度。"""
-    if not chunks:
-        return True
-    top = chunks[0]
-    if top.vector_score is None:
-        return True  # Top1 仅命中关键词路，缺乏语义佐证
-    return top.vector_score < settings.retrieval_min_score
+    return {"retrieved_chunks": chunks}
 
 
 

@@ -165,3 +165,130 @@ def build_hyde_messages(question: str) -> list[BaseMessage]:
 
 def build_multi_query_messages(question: str, n: int) -> list[BaseMessage]:
     return list(MULTI_QUERY_PROMPT.invoke({"question": question, "n": n}).to_messages())
+
+# ============================================================
+# 第 7 章：Agentic RAG 决策器 prompt
+# ============================================================
+
+_AGENT_PLAN_SYSTEM= """你是 RAG 系统的检索决策器。 系统会基于检索到的片段回答用户问题，
+但上一轮 检索的结果不够好（Top1 语义相似度过低或没有命中）。请基于“前几轮的检索观察”，决定下一步：
+
+可选 action：
+- proceed: 当前候选已经足够回答问题，直接进入答案生成。
+- rewrite_query：当前 query 不够清晰/ 过于口语化 / 含指代， 需要换一个表达再检索；必须给出 new_query。
+- switch_route: 换一种检索策略。 可选 new_route: original / rewrite /hyde /multi_query。
+- refuse: 多轮都召回不到相关内容，知识库可能不覆盖，提前拒答。
+
+策略选择建议：
+- 已经尝试过 rewrite 仍未命中 -> 试 hyde (抽象问题) 或 multi_query (多角度)。
+- 已经尝试过 multi_query 仍未命中 -> 试 refuse。
+- 问题里包含明确实体 / 编号但都没检索到 -> 优先 refuse, 避免无意义改写。
+
+只输出**单行 JSON**, 键固定为 action / reason / new_query / new_route, 缺失字段填 null。
+实例：{{"action": "rewrite_query", "reason": "原 query 含指代", "new_query": "差旅住宿标准", "new_route": null}}
+
+"""
+
+_AGENT_PLAN_HUMAN ="""用户原始问题：{question}
+
+当前 query: {current_query}
+当前 route: {current_route}
+
+历史轮次观察：
+{history}
+
+请输出下一步决策的 JSON。
+
+"""
+
+AGENT_PLAN_PROMPT = ChatPromptTemplate.from_messages(
+    [("system", _AGENT_PLAN_SYSTEM), ("human", _AGENT_PLAN_HUMAN)]
+)
+
+def build_agent_plan_messages(
+    question: str,
+    current_query: str,
+    current_route: str,
+    history: str,
+
+) -> list[BaseMessage]:
+    return list(
+        AGENT_PLAN_PROMPT.invoke(
+            {
+                "question": question,
+                "current_query": current_query,
+                "current_route": current_route,
+                "history": history,
+            }
+        ).to_messages()
+    )
+
+# ============================================================
+# 第 8 章：多轮上下文、答案校验 prompt
+# ============================================================
+
+_CONTEXTUALIZE_SYSTEM = """你是一个多轮对话查询改写助手。请基于对话历史把用户当前问题改写成**独立完整、可单独检索**的问句：
+
+- 消解指代： "它"、"这个"、"上面提到的..."、"刚才那个..."等
+- 补全省略：用户在追问场景里经常省略主语或宾语，需要从历史里把缺失成分补全
+- 不要回答问题，不要扩展含义，不要改变用户的真实意图
+- 不要加任何引号、编号、解释，只输出单行改写后的问句
+- 如果当前问题已经独立完整，直接原样输出
+【对话历史】
+{history}"""
+
+_CONTEXTUALIZE_HUMAN = "{question}"
+
+CONTEXTUALIZE_PROMPT = ChatPromptTemplate.from_messages(
+    [("system", _CONTEXTUALIZE_SYSTEM), ("human", _CONTEXTUALIZE_HUMAN)]
+)
+
+def build_contextualize_messages(question: str, history: str) -> list[BaseMessage]:
+    return list(
+        CONTEXTUALIZE_PROMPT.invoke(
+            {"question": question, "history": history}
+        ).to_messages()
+    )
+
+_VERIFY_ANSWER_SYSTEM = """你是一个 RAG 答案可信度校验员。请判断回答是否**完全被给定的参考片段支撑**。
+
+判定标准：
+- 答案中每个关键事实结论（数字、名称、规则、时间、条款）都必须能在某个片段原文中**直接找到**
+- 礼貌话、转折词、复述问题的句子不算关键结论，可忽略
+- 答案标了 [N] 引用编号的，要重点核对：N 号片段是否真的支撑这条结论
+- 出现"未在知识库中找到"等明确拒答文案时直接判 verified=true（拒答本身就是被允许的输出）
+
+判定结果：
+- verified=true: 所有关键结论都被支撑
+- verified=false: 存在编造、引用张冠李戴、或片段里完全没提到的事实
+
+输出**单行 JSON**，键固定为 verified / reason，reason 用一句话说清楚理由（中文）。
+示例：{{"verified": false, "reason": "答案提到差旅住宿 800 元，片段中只提到 600 元"}}"""
+
+_VERIFY_ANSWER_HUMAN = """【用户问题】
+{question}
+
+【参考片段】
+{chunks_text}
+
+【模型回答】
+{answer}
+
+请输出校验结果 JSON。"""
+
+VERIFY_ANSWER_PROMPT = ChatPromptTemplate.from_messages(
+    [("system", _VERIFY_ANSWER_SYSTEM), ("human", _VERIFY_ANSWER_HUMAN)]
+)
+
+def build_verify_answer_messages(
+    question: str, answer: str, chunks_text: str
+) -> list[BaseMessage]:
+    return list(
+        VERIFY_ANSWER_PROMPT.invoke(
+            {
+                "question": question,
+                "answer": answer,
+                "chunks_text": chunks_text,
+            }
+        ).to_messages()
+    )
