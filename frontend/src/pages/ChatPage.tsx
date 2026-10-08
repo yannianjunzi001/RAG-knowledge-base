@@ -30,7 +30,7 @@ import { formatApiError } from '@/utils/errors'
 import { QueryRoutePanel } from '@/components/QueryRoutePanel'
 import { AgentStepsPanel } from '@/components/AgentStepsPanel'
 import { ConversationSidebar } from '@/components/ConversationSidebar'
-
+import { TraceIdPanel } from '@/components/TraceIdPanel'
 const {  Text } = Typography
 const { TextArea } = Input
 const { Sider, Content } = Layout
@@ -52,7 +52,8 @@ interface UiMessage {
     refused?: boolean
     status?: AssistantStatus
     error?: string | null
-
+    traceId?: string | null
+    traceUrl?: string | null
 }
 
 function fromServerMessage(m: MessageRead): UiMessage {
@@ -66,6 +67,8 @@ function fromServerMessage(m: MessageRead): UiMessage {
         verifyResult: m.verify_result ?? null,
         refused: m.role === 'assistant' && m.content === REFUSAL_ANSWER,
         status: 'done',
+        traceId: m.trace_id ?? null,
+        traceUrl: m.trace_url ?? null,
     }
 }
 
@@ -214,6 +217,11 @@ export function ChatPage() {
                 onEvent: (event: ChatStreamEvent) => {
                     switch (event.type) {
                         case 'start':
+                            updateAssistant((prev) => ({
+                                ...prev,
+                                traceId: event.traceId,
+                                traceUrl: event.traceUrl,
+                              }))
                             break
                         case 'query_route':
                             updateAssistant((prev) => ({ ...prev, queryRoute: event.queryRoute }))
@@ -483,7 +491,9 @@ function MessageBubble({ message }: MessageBubbleProps) {
                         <Spin size="small" /> 正在思考...
                     </Text>
                 ) : null}
-                
+                {!isUser && message.traceId ? (
+                    <TraceIdPanel traceId={message.traceId} traceUrl={message.traceUrl} />
+            ) : null}
                 {!isUser && message.queryRoute ? (
                     <QueryRoutePanel queryRoute={message.queryRoute} />
                 ) : null}

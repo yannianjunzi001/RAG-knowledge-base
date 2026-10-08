@@ -19,6 +19,8 @@ from app.db.session import AsyncSessionLocal
 from app.retrieval.keyword_retriever import KeywordRetriever
 from app.retrieval.vector_retriever import RetrievedChunk, VectorRetriever
 
+from langsmith import traceable
+
 logger = get_logger(__name__)
 
 
@@ -30,7 +32,7 @@ class HybridRetriever:
       把底层 asyncpg 连接搞成 InFailedSQLTransactionError，污染调用方事务
     - 检索过程纯只读，与调用方的写事务（落库 user / assistant 消息）天然解耦
     """
-
+    @traceable(name="VectorRetriever.search", run_type="retriever")
     async def search(
         self,
         query: str,

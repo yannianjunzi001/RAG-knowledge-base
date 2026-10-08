@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
+from app.core.observability import build_trace_url
 from pydantic import BaseModel, ConfigDict, Field
 
 MessageRoleValue = Literal["user", "assistant", "system"]
@@ -145,17 +146,23 @@ class MessageRead(BaseModel):
     agent_steps: list[AgentStep] | None = None
     # 第 8 章 answer_verifier 校验结果；user / 旧消息 / 拒答路径为 None
     verify_result: VerifyResultRead | None = None
+    trace_id: str | None = None
+    trace_url: str | None = None
 
 
 
     @classmethod
     def from_orm(cls, message) -> "MessageRead":  # type: ignore[no-untyped-def]
         is_assistant = message.role == "assistant"
+        trace_id = _parse_trace_id(message.extra_metadata) if is_assistant else None
         return cls(
             id=message.id,
             role=message.role,
             content=message.content,
             created_at=message.created_at,
+            trace_id=trace_id,
+            trace_url=build_trace_url(trace_id),
+
             citations=[CitationRead.from_orm(c) for c in message.citations]
             if is_assistant
             else [],
@@ -184,6 +191,16 @@ def _parse_query_route(metadata: dict | None) -> QueryRouteRead | None:
         return QueryRouteRead.model_validate(raw)
     except Exception:
         return None
+
+def _parse_trace_id(metadata: dict | None) -> str | None:
+    """从 messages.extra_metadata 中提取 trace_id。"""
+    if not metadata:
+        return None
+    raw = metadata.get("trace_id")
+    # 如果拿出来的不是字符串，或者是空字符串，一律当成没拿到
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw
 
 def _parse_agent_steps(metadata: dict | None) -> list[AgentStep] | None:
     """从 messages.extra_metadata 解析 agent_steps；缺失 / 非法静默返回 None。"""

@@ -18,6 +18,12 @@ from app.workflows.graph import get_rag_graph
 from app.workflows.nodes import load_context, stream_generate
 from app.workflows.rag_state import RAGState
 
+from langsmith import traceable
+from app.core.observability import build_trace_url, get_current_trace_id
+
+from app.core.observability import build_trace_url, get_current_trace_id
+
+
 logger = get_logger(__name__)
 
 
@@ -88,7 +94,7 @@ class ChatService:
         await self.session.commit()
 
     # ===== 流式问答主链路 =====
-
+    @traceable(name="ChatService.stream_answer", run_type="chain")
     async def stream_answer(
         self, conversation_id: UUID, question: str
     ) -> AsyncIterator[dict]:
@@ -107,9 +113,13 @@ class ChatService:
 
         async with AsyncSessionLocal() as session:
             try:
+                # 取 LangSmith trace_id: @traceable 已经为本次 stream_answer 上下文中
+                # 这里读到的就是整次问答的 trace_id; 未启用观测时返回 None
+                trace_id = get_current_trace_id()
                 state: RAGState = {
                     "conversation_id": conversation_id,
                     "question": question,
+                    "trace_id": trace_id,
                 }
 
                 # 1. 加载上下文（仅历史消息，本轮 user 此刻尚未入库）+ 改写查询
@@ -125,7 +135,11 @@ class ChatService:
 
                 yield {
                     "event": "message_start",
-                    "data": {"user_message_id": str(state["user_message_id"])},
+                    "data": {
+                        "user_message_id": str(state["user_message_id"]),
+                        "trace_id": trace_id,
+                        "trace_url": build_trace_url(trace_id),
+                    },
                 }
 
                 #  把 query 路由结果推给前端调试面板（始终发送，前端按 route 选择渲染）
@@ -258,6 +272,7 @@ class ChatService:
             "refused": bool(state.get("refused")),
             "query_route": _build_query_route_payload(state),
             "agent_steps": _serialize_agent_steps(state),
+            "trace_id": state.get("trace_id"),
         }
         if verify_result is not None:
             # verify_result 复用 SSE 载荷格式，但 metadata 不需要 replacement_answer

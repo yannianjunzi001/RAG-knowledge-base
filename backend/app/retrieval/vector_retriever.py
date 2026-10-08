@@ -6,6 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.repositories.chunk_repo import DocumentChunkRepository
 from app.ingestion.embedder import get_embeddings
 
+from langsmith import traceable
+
 @dataclass(frozen=True)
 class RetrievedChunk:
     """检索结果中单个 chunk 的展示视图。
@@ -42,6 +44,7 @@ class VectorRetriever:
     def __init__(self, session: AsyncSession) -> None:
         self.chunk_repo = DocumentChunkRepository(session)
 
+    @traceable(name="VectorRetriever.search", run_type="retriever")
     async def search(self, query: str, top_k: int) -> list[RetrievedChunk]:
         # 单 query 走 aembed_query，DashScope 单条调用更直接
         embedding = await get_embeddings().aembed_query(query)
