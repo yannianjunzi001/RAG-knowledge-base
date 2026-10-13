@@ -18,6 +18,9 @@ class DocumentRead(BaseModel):
     size: int
     status: DocumentStatusValue
     error_message: str | None = None
+    permission_tags: list[str] = Field(default_factory=list)
+    # 上传者 user_id；用户被硬删后置 None
+    created_by: UUID | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -97,3 +100,8 @@ class DocumentChunkDetail(BaseModel):
             chunk_hash=chunk.chunk_hash,
             created_at=chunk.created_at,
         )
+        
+class DocumentPermissionTagsUpdate(BaseModel):
+    """admin 改文档可见性标签的请求体。"""
+
+    permission_tags: list[str] = Field(default_factory=list)

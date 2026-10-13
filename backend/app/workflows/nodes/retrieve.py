@@ -11,6 +11,7 @@ from app.retrieval.hybrid_retriever import HybridRetriever
 async def retrieve(state: RAGState) -> RAGState:
     retriever = HybridRetriever()
     recall_top_k = settings.retrieval_recall_top_k
+    permissions = state.get("permissions") # <--- 取出权限标签
 
     if state.get("route") == "multi_query" and state.get("multi_queries"):
         # 各子查询独立走 hybrid 检索，再合并；不做嵌套 RRF
@@ -21,6 +22,7 @@ async def retrieve(state: RAGState) -> RAGState:
                     sub_query,
                     recall_top_k=recall_top_k,
                     final_top_k=recall_top_k,
+                    permission_tags=permissions,
                 )
             )
         chunks = _merge_chunks(bundles, top_k=recall_top_k,)
@@ -29,6 +31,7 @@ async def retrieve(state: RAGState) -> RAGState:
             state["query"],
             recall_top_k=recall_top_k,
             final_top_k=recall_top_k,
+            permission_tags=permissions,
         )
     
     return {"retrieved_chunks": chunks}

@@ -5,7 +5,7 @@ from app.api.error_handlers import register_error_handlers
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
 from app.core.observability import configure_observability
-from app.api.routes import chat, documents, evaluations, health
+from app.api.routes import auth, chat, documents, evaluations, health, roles, users
 from app.db.seed import seed_default_admin
 
 from contextlib import asynccontextmanager
@@ -35,6 +35,12 @@ def create_app() ->FastAPI:
 
     app.include_router(evaluations.router, prefix="/api")
 
+    app.include_router(auth.router, prefix="/api")
+    
+    app.include_router(users.router, prefix="/api")
+    
+    app.include_router(roles.router, prefix="/api")
+    
     logger.info("app initialized: %s",settings.app_name)
     return app
 
