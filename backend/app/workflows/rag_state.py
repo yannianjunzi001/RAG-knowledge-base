@@ -57,3 +57,8 @@ class RAGState(TypedDict, total=False):
     # LangSmith trace_id: 未启用观测 / 取不到 run tree 时为 None
     # 仅由 service 层 stream_answer 进入 @traceable 上下文后写入，节点不感知
     trace_id: str | None
+
+    # 用户有效权限标签，由 service 在进图前注入
+    # 含 "*" 时检索 SQL 不附加权限过滤（admin 视角）；
+    # 评测路径传 ["*"] 让评测不被权限拦住
+    permissions: list[str]

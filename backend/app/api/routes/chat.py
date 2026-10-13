@@ -5,7 +5,7 @@ from fastapi import APIRouter, Query, Response
 from fastapi.responses import EventSourceResponse
 from fastapi.sse import ServerSentEvent
 
-from app.api.deps import DbSession
+from app.api.deps import DbSession,CurrentUser
 from app.api.schemas.chat import (
     ChatRequest,
     ConversationCreate,
@@ -27,11 +27,12 @@ router = APIRouter(prefix="/conversations", tags=["chat"])
     operation_id="createConversation",
 )
 async def create_conversation(
+    user: CurrentUser, 
     payload: ConversationCreate,
     session: DbSession,
 ) -> ConversationRead:
     service = ChatService(session)
-    conversation = await service.create_conversation(title=payload.title)
+    conversation = await service.create_conversation(user_id=user.id,title=payload.title)
     return ConversationRead.model_validate(conversation)
 
 
@@ -41,12 +42,13 @@ async def create_conversation(
     operation_id="getConversation",
 )
 async def get_conversation(
+    user: CurrentUser,
     conversation_id: UUID,
     session: DbSession,
 ) -> ConversationDetail:
     """返回会话本身 + 全部历史消息（含引用）。"""
     service = ChatService(session)
-    conversation, messages = await service.list_messages(conversation_id)
+    conversation, messages = await service.list_messages(conversation_id,user_id=user.id)
     return ConversationDetail(
         conversation=ConversationRead.model_validate(conversation),
         messages=[MessageRead.from_orm(m) for m in messages],
@@ -59,6 +61,7 @@ async def get_conversation(
     response_class=EventSourceResponse,
 )
 async def stream_chat(
+    user: CurrentUser,
     conversation_id: UUID,
     payload: ChatRequest,
     session: DbSession,
@@ -69,7 +72,7 @@ async def stream_chat(
     任何阶段出错 yield error。前端用 @microsoft/fetch-event-source 接。
     """
     service = ChatService(session)
-    async for sse_event in service.stream_answer(conversation_id, payload.question):
+    async for sse_event in service.stream_answer(conversation_id, payload.question, current_user=user):
         yield ServerSentEvent(
             data=sse_event["data"],
             event=sse_event["event"],
@@ -83,12 +86,13 @@ async def stream_chat(
     summary="按更新时间倒序分页列出所有会话",
 )
 async def list_conversations(
+    user: CurrentUser,
     session: DbSession,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ) -> ConversationPage:
     service = ChatService(session)
-    items, total = await service.list_conversations(page=page, page_size=page_size)
+    items, total = await service.list_conversations(page=page, page_size=page_size, user_id=user.id)
     return ConversationPage(
         items=[
             ConversationListItem(
@@ -111,9 +115,10 @@ async def list_conversations(
     operation_id="deleteConversation",
 )
 async def delete_conversation(
+    user: CurrentUser,
     conversation_id: UUID,
     session: DbSession,
 ) -> Response:
     service = ChatService(session)
-    await service.delete_conversation(conversation_id)
+    await service.delete_conversation(conversation_id, user_id=user.id)
     return Response(status_code=204)

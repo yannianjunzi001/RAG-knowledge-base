@@ -1,13 +1,16 @@
 from collections.abc import AsyncIterator
 from uuid import UUID
 
+import time
+from dataclasses import dataclass, field
+
 from app.core.config import settings
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError
 from app.core.logging import get_logger
-from app.db.models import AnswerCitation, Conversation, Message
+from app.db.models import AnswerCitation, Conversation, Message,User
 from app.db.repositories.citation_repo import AnswerCitationRepository
 from app.db.repositories.conversation_repo import ConversationRepository
 from app.db.session import AsyncSessionLocal
@@ -17,14 +20,38 @@ from app.retrieval.vector_retriever import RetrievedChunk
 from app.workflows.graph import get_rag_graph
 from app.workflows.nodes import load_context, stream_generate
 from app.workflows.rag_state import RAGState
+from app.services.permission_service import (
+    WILDCARD_PERMISSION_TAG,
+    compute_user_permission_tags,
+)
 
 from langsmith import traceable
 from app.core.observability import build_trace_url, get_current_trace_id
 
-from app.core.observability import build_trace_url, get_current_trace_id
-
 
 logger = get_logger(__name__)
+
+@dataclass(frozen=True)
+class EvaluationAnswer:
+    """评测专用：跑一遍 RAG 拿到的非流式结果快照。
+
+    与 stream_answer 不同：不写 conversations / messages，避免评测污染线上历史；
+    chunks 直接给原始 RetrievedChunk，便于上层算 RAGAS retrieved_contexts。
+    """
+    answer: str
+    refused: bool
+    chunks: list[RetrievedChunk]
+    query_route: dict
+    agent_steps: list[dict]
+    verify_result: VerifyResult | None
+    trace_id: str | None
+    latency_ms: int
+    # 首 token 延迟（毫秒）：从 stream_answer 开始到 LLM 吐出第一个 token 为止
+    # 拒答路径 / 报错时为 None
+    first_token_latency_ms: int | None
+    error_message: str | None = None
+    citations: list[dict] = field(default_factory=list)
+
 
 
 def _serialize_citation(chunk: RetrievedChunk, ordinal: int) -> dict:
@@ -55,6 +82,94 @@ class ChatService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
+    @traceable(name="ChatService.answer_for_evaluation", run_type="chain")
+    async def answer_for_evaluation(self, question: str) -> EvaluationAnswer:
+        """跑一遍完整 RAG 拿非流式结果，用于离线评测。
+
+        与 stream_answer 区别：
+        - 不创建 conversation，不落 user/assistant 消息（评测不污染线上历史）
+        - chat_history 强制空：评测集每条独立，第 8 章 contextualize 改写自动跳过
+        - 把流式 token 聚合成完整 answer 后再做 verify_answer 校验
+        - 失败时把 error_message 落到 EvaluationAnswer，由调用方决定怎么记录
+        """
+        started_at = time.perf_counter()
+        trace_id = get_current_trace_id()
+        state: RAGState = {
+            "conversation_id": UUID(int=0),  # 占位，评测不写库所以用不到
+            "question": question,
+            "chat_history": [],
+            "permissions": [WILDCARD_PERMISSION_TAG],
+            "trace_id": trace_id,
+        }
+
+        try:
+            final_state = await get_rag_graph().ainvoke(state)
+            state.update(final_state)  # type: ignore[arg-type]
+
+            verify_result: VerifyResult | None = None
+            first_token_latency_ms: int | None = None
+            if state.get("refused"):
+                answer = state["answer"]
+            else:
+                # stream_generate 是 AsyncIterator[str]，评测里直接拼成整段
+                # 首个 token yield 时记录耗时，作为「首 token 延迟」指标
+                parts: list[str] = []
+                async for delta in stream_generate(state):
+                    if first_token_latency_ms is None:
+                        first_token_latency_ms = int(
+                            (time.perf_counter() - started_at) * 1000
+                        )
+                    parts.append(delta)
+                answer = "".join(parts)
+                state["answer"] = answer
+
+                if settings.verify_answer_enabled:
+                    verify_result = await get_answer_verifier().verify(
+                        question=question,
+                        answer=answer,
+                        chunks=list(state.get("retrieved_chunks", [])),
+                    )
+                    if not verify_result.verified:
+                        # 与 stream_answer 同口径：校验失败覆盖成统一拒答
+                        answer = REFUSAL_ANSWER
+                        state["answer"] = answer
+                        state["refused"] = True
+
+            chunks = list(state.get("retrieved_chunks", []))
+            refused = bool(state.get("refused"))
+            citations = (
+                []
+                if refused
+                else [_serialize_citation(c, ordinal=i) for i, c in enumerate(chunks, start=1)]
+            )
+
+            return EvaluationAnswer(
+                answer=answer,
+                refused=refused,
+                chunks=chunks,
+                query_route=_build_query_route_payload(state),
+                agent_steps=_serialize_agent_steps(state),
+                verify_result=verify_result,
+                trace_id=trace_id,
+                latency_ms=int((time.perf_counter() - started_at) * 1000),
+                first_token_latency_ms=first_token_latency_ms,
+                citations=citations,
+            )
+        except Exception as exc:
+            logger.exception("evaluation answer failed: question=%r", question)
+            return EvaluationAnswer(
+                answer="",
+                refused=False,
+                chunks=[],
+                query_route=_build_query_route_payload(state),
+                agent_steps=_serialize_agent_steps(state),
+                verify_result=None,
+                trace_id=trace_id,
+                latency_ms=int((time.perf_counter() - started_at) * 1000),
+                first_token_latency_ms=None,
+                error_message=str(exc).strip() or exc.__class__.__name__,
+            )
+
     # ===== 非流式接口（基础 CRUD）=====
 
     async def create_conversation(self, title: str = "新对话") -> Conversation:
@@ -64,31 +179,31 @@ class ChatService:
         await self.session.refresh(conversation)
         return conversation
 
-    async def get_conversation(self, conversation_id: UUID) -> Conversation:
+    async def get_conversation(self, conversation_id: UUID,user_id: UUID | None = None) -> Conversation:
         repo = ConversationRepository(self.session)
-        conversation = await repo.get(conversation_id)
+        conversation = await repo.get(conversation_id, user_id=user_id)
         if conversation is None:
             raise NotFoundError("会话不存在")
         return conversation
 
     async def list_messages(
-        self, conversation_id: UUID
+        self, conversation_id: UUID, user_id: UUID | None = None
     ) -> tuple[Conversation, list[Message]]:
         # 先校验会话存在，避免"空会话"和"会话不存在"被混淆
-        conversation = await self.get_conversation(conversation_id)
+        conversation = await self.get_conversation(conversation_id, user_id=user_id)
         repo = ConversationRepository(self.session)
         messages = await repo.list_messages(conversation_id)
         return conversation, messages
 
     async def list_conversations(
-        self, page: int, page_size: int
+        self, page: int, page_size: int, user_id: UUID | None = None
     ) -> tuple[list[tuple[Conversation, int]], int]:
         repo = ConversationRepository(self.session)
-        return await repo.list_page(page=page, page_size=page_size)
+        return await repo.list_page(page=page, page_size=page_size, user_id=user_id)
 
-    async def delete_conversation(self, conversation_id: UUID) -> None:
+    async def delete_conversation(self, conversation_id: UUID, user_id: UUID | None = None) -> None:
         repo = ConversationRepository(self.session)
-        deleted = await repo.delete(conversation_id)
+        deleted = await repo.delete(conversation_id, user_id=user_id)
         if not deleted:
             raise NotFoundError("会话不存在")
         await self.session.commit()
@@ -96,7 +211,11 @@ class ChatService:
     # ===== 流式问答主链路 =====
     @traceable(name="ChatService.stream_answer", run_type="chain")
     async def stream_answer(
-        self, conversation_id: UUID, question: str
+        self,
+        conversation_id: UUID, 
+        question: str,
+        *,
+        current_user: User,
     ) -> AsyncIterator[dict]:
         """逐事件 yield SSE 载荷。
 
@@ -109,7 +228,8 @@ class ChatService:
         - 任何阶段出错则改 yield error 并提前结束。
         """
         # 校验会话存在用 service 自带 session；流式跑用独立 session
-        await self.get_conversation(conversation_id)
+        await self.get_conversation(conversation_id,user_id=current_user.id)
+        permissions = compute_user_permission_tags(current_user)
 
         async with AsyncSessionLocal() as session:
             try:
@@ -119,6 +239,7 @@ class ChatService:
                 state: RAGState = {
                     "conversation_id": conversation_id,
                     "question": question,
+                    "permissions": permissions, 
                     "trace_id": trace_id,
                 }
 
