@@ -11,17 +11,19 @@ import {
     Typography,
     message as antdMessage,
 } from 'antd'
+import { useAuthStore } from '@/stores/authStore'
 import { RobotOutlined, SendOutlined, UserOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { createConversation, getConversation } from '@/client/sdk.gen'
-import type { AgentStep,
+import type {
+    AgentStep,
     CitationRead,
     MessageRead,
     QueryRouteRead,
-    VerifyResultRead, 
-     } from '@/client/types.gen'
+    VerifyResultRead,
+} from '@/client/types.gen'
 import { streamChat, type ChatStreamEvent } from '@/api/chatStream'
 import { conversationsQueryKey } from '@/api/queryKeys'
 import { gfmComponents } from '@/components/markdownComponents'
@@ -31,11 +33,11 @@ import { QueryRoutePanel } from '@/components/QueryRoutePanel'
 import { AgentStepsPanel } from '@/components/AgentStepsPanel'
 import { ConversationSidebar } from '@/components/ConversationSidebar'
 import { TraceIdPanel } from '@/components/TraceIdPanel'
-const {  Text } = Typography
+const { Text } = Typography
 const { TextArea } = Input
 const { Sider, Content } = Layout
 
-const STORAGE_KEY = 'rag.chat.conversation_id'
+const STORAGE_KEY_PREFIX = 'rag.chat.conversation_id'
 /** 与后端 REFUSAL_ANSWER 文案一致；用来判定历史消息是否拒答 */
 const REFUSAL_ANSWER = '抱歉，知识库中没有找到与该问题相关的可靠依据。'
 
@@ -54,6 +56,7 @@ interface UiMessage {
     error?: string | null
     traceId?: string | null
     traceUrl?: string | null
+    cacheHit?:boolean
 }
 
 function fromServerMessage(m: MessageRead): UiMessage {
@@ -69,13 +72,17 @@ function fromServerMessage(m: MessageRead): UiMessage {
         status: 'done',
         traceId: m.trace_id ?? null,
         traceUrl: m.trace_url ?? null,
+        cacheHit: Boolean(m.cache_hit),
     }
 }
 
 export function ChatPage() {
     const queryClient = useQueryClient()
+    const userId = useAuthStore((s) => s.user?.id)
+    // 按用户隔离，避免切换账号后读到其他用户的会话 ID
+    const storageKey = `${STORAGE_KEY_PREFIX}.${userId}`
     const [conversationId, setConversationId] = useState<string | null>(
-        () => localStorage.getItem(STORAGE_KEY),
+        () => localStorage.getItem(storageKey),
     )
     const [draft, setDraft] = useState('')
     // 流式过程中的临时消息（只放在前端 state，结束后由历史接口回填正式 id）
@@ -91,13 +98,13 @@ export function ChatPage() {
             return res.data!
         },
         onSuccess: async (conversation) => {
-            localStorage.setItem(STORAGE_KEY, conversation.id)
+            localStorage.setItem(storageKey, conversation.id)
             setConversationId(conversation.id)
             setPendingMessages([])
             // 失效旧的历史缓存 + 刷新侧栏列表
             queryClient.removeQueries({ queryKey: ['conversation'] })
             await queryClient.invalidateQueries({ queryKey: conversationsQueryKey })
-        
+
         },
     })
 
@@ -107,22 +114,22 @@ export function ChatPage() {
     }
 
     const handleSelectConversation = (id: string) => {
-        if (id === conversationId) return                 
+        if (id === conversationId) return
         abortRef.current?.abort()
         setPendingMessages([])
-        setIsStreaming(false)                            
-        localStorage.setItem(STORAGE_KEY, id)
+        setIsStreaming(false)
+        localStorage.setItem(storageKey, id)
         setConversationId(id)
     }
 
     const handleConversationDeleted = (deletedId: string) => {
         if (deletedId !== conversationId) return
-        abortRef.current?.abort()                          
+        abortRef.current?.abort()
         setPendingMessages([])
-        setIsStreaming(false)                              
-        localStorage.removeItem(STORAGE_KEY)
+        setIsStreaming(false)
+        localStorage.removeItem(storageKey)
         setConversationId(null)
-        queryClient.removeQueries({ queryKey: ['conversation', deletedId] })  
+        queryClient.removeQueries({ queryKey: ['conversation', deletedId] })
     }
 
     // 没有 conversation_id 时自动创建一个
@@ -167,9 +174,9 @@ export function ChatPage() {
         }
     }, [])
 
-    
 
-    
+
+
 
     // 更新最后一条 assistant 消息
     const updateAssistant = (updater: (prev: UiMessage) => UiMessage) => {
@@ -221,12 +228,13 @@ export function ChatPage() {
                                 ...prev,
                                 traceId: event.traceId,
                                 traceUrl: event.traceUrl,
-                              }))
+                                cacheHit: event.cacheHit,
+                            }))
                             break
                         case 'query_route':
                             updateAssistant((prev) => ({ ...prev, queryRoute: event.queryRoute }))
                             break
-                        case 'agent_steps':                                            
+                        case 'agent_steps':
                             updateAssistant((prev) => ({ ...prev, agentSteps: event.steps }))
                             break
                         case 'citations':
@@ -235,7 +243,7 @@ export function ChatPage() {
                         case 'token':
                             updateAssistant((prev) => ({ ...prev, content: prev.content + event.delta }))
                             break
-                        case 'verify_result':                                          
+                        case 'verify_result':
                             updateAssistant((prev) => {
                                 const verifyResult: VerifyResultRead = {
                                     verified: event.verified,
@@ -258,7 +266,7 @@ export function ChatPage() {
                             updateAssistant((prev) => ({
                                 ...prev,
                                 status: 'done',
-                                refused: prev.refused || event.refused,   
+                                refused: prev.refused || event.refused,
                             }))
                             break
                         case 'error':
@@ -432,14 +440,24 @@ function AssistantHeader({ message }: { message: UiMessage }) {
             />
         )
     }
-    if (message.verifyResult?.verified === true) {
-        return (
-            <div style={{ marginBottom: 8 }}>
-                <Tag color="green">已校验</Tag>
-            </div>
+    // 缓存命中与已校验是并列的状态指示，互不斥（命中场景下没有 verify，但允许同时出现）
+    const tags: React.ReactNode[] = []
+    if (message.cacheHit) {
+        tags.push(
+            <Tag key="cache" color="cyan">
+                缓存命中
+            </Tag>,
         )
     }
-    return null
+    if (message.verifyResult?.verified === true) {
+        tags.push(
+            <Tag key="verified" color="green">
+                已校验
+            </Tag>,
+        )
+    }
+    if (tags.length === 0) return null
+    return <div style={{ marginBottom: 8 }}>{tags}</div>
 }
 
 function MessageBubble({ message }: MessageBubbleProps) {
@@ -493,7 +511,7 @@ function MessageBubble({ message }: MessageBubbleProps) {
                 ) : null}
                 {!isUser && message.traceId ? (
                     <TraceIdPanel traceId={message.traceId} traceUrl={message.traceUrl} />
-            ) : null}
+                ) : null}
                 {!isUser && message.queryRoute ? (
                     <QueryRoutePanel queryRoute={message.queryRoute} />
                 ) : null}

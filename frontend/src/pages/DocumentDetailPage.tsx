@@ -1,4 +1,7 @@
-import { useMemo, useState,useEffect } from 'react'
+import { useMemo, useState, useEffect, useRef } from 'react'
+import { Progress } from 'antd'
+import { reindexDocument } from '@/client/sdk.gen'
+import type { IngestionTaskRead } from '@/client/types.gen'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import {
@@ -24,6 +27,7 @@ import {
     DownloadOutlined,
     EyeOutlined,
     RedoOutlined,
+    CloudUploadOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -33,7 +37,7 @@ import {
     listDocumentChunks,
     retryDocument,
 } from '@/client/sdk.gen'
-import type { DocumentRead,DocumentChunkRead, DocumentChunkDetail } from '@/client/types.gen'
+import type { DocumentRead, DocumentChunkRead, DocumentChunkDetail } from '@/client/types.gen'
 import {
     getStatusColor,
     getStatusLabel,
@@ -49,9 +53,10 @@ import {
 
 import remarkGfm from 'remark-gfm'
 import { gfmComponents } from '@/components/markdownComponents'
+import { useAuthStore } from '@/stores/authStore'
 
 
-const { Title,Text,Paragraph } = Typography
+const { Title, Text, Paragraph } = Typography
 
 const CHUNK_PAGE_SIZE = 20
 
@@ -65,6 +70,7 @@ export function DocumentDetailPage() {
     const { id = '' } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const queryClient = useQueryClient()
+    const isAdmin = useAuthStore((s) => Boolean(s.user?.isAdmin))
 
     const [chunkPage, setChunkPage] = useState(1)
     const [activeChunkId, setActiveChunkId] = useState<string | null>(null)
@@ -131,6 +137,30 @@ export function DocumentDetailPage() {
         },
     })
 
+    const reindexMutation = useMutation({
+        mutationFn: async (file: File) => {
+            const res = await reindexDocument({
+                path: { document_id: id },
+                body: { file },
+            })
+            return res.data!
+        },
+        onSuccess: () => {
+            message.success('已提交重新索引，正在解析与增量更新')
+            queryClient.invalidateQueries({ queryKey: ['documents'] })
+        },
+    })
+
+    const reindexInputRef = useRef<HTMLInputElement>(null)
+    const onPickReindexFile: React.ChangeEventHandler<HTMLInputElement> = (e) => {
+        const file = e.target.files?.[0]
+        if (file) {
+            reindexMutation.mutate(file)
+        }
+        // 清空 input，让相同文件名也能再次触发 onChange
+        e.target.value = ''
+    }
+
     const previewUrl = useMemo(() => buildDocumentFileUrl(id, { download: false }), [id])
     const downloadUrl = useMemo(() => buildDocumentFileUrl(id, { download: true }), [id])
 
@@ -163,6 +193,25 @@ export function DocumentDetailPage() {
                     >
                         重试解析
                     </Button>
+                ) : null}
+                {isAdmin ? (
+                    <>
+                        <input
+                            ref={reindexInputRef}
+                            type="file"
+                            accept=".pdf,.docx,.md,.markdown,.html,.htm"
+                            style={{ display: 'none' }}
+                            onChange={onPickReindexFile}
+                        />
+                        <Button
+                            icon={<CloudUploadOutlined />}
+                            disabled={!isTerminalStatus(doc.status)}
+                            loading={reindexMutation.isPending}
+                            onClick={() => reindexInputRef.current?.click()}
+                        >
+                            上传新版本
+                        </Button>
+                    </>
                 ) : null}
                 <Popconfirm
                     title="确认删除该文档？"
@@ -204,11 +253,24 @@ export function DocumentDetailPage() {
                 <Descriptions.Item label="文件 hash">{doc.file_hash}</Descriptions.Item>
                 <Descriptions.Item label="MIME 类型">{doc.mime_type}</Descriptions.Item>
                 <Descriptions.Item label="大小">{formatSize(doc.size)}</Descriptions.Item>
+
+                <Descriptions.Item label="版本">
+                    <Tag color="purple">v{doc.version}</Tag>
+                </Descriptions.Item>
                 <Descriptions.Item label="上传时间">
                     {new Date(doc.created_at).toLocaleString('zh-CN')}
                 </Descriptions.Item>
                 <Descriptions.Item label="更新时间">
                     {new Date(doc.updated_at).toLocaleString('zh-CN')}
+                    <Descriptions bordered column={1} size="middle" style={{ marginBottom: 24 }}>
+                    </Descriptions>
+
+                    {/* 新增「最近一次入库任务」卡片 */}
+                    {doc.latest_task ? (
+                        <Card title="最近一次入库任务" style={{ marginBottom: 24 }}>
+                            <IngestionTaskCard task={doc.latest_task} />
+                        </Card>
+                    ) : null}
                 </Descriptions.Item>
             </Descriptions>
 
@@ -241,6 +303,7 @@ export function DocumentDetailPage() {
             </Modal>
         </div>
     )
+
 }
 
 // =====  原文预览组件 =====
@@ -286,7 +349,11 @@ function MarkdownPreview({ url }: { url: string }) {
         let cancelled = false
         setContent(null)
         setError(null)
-        fetch(url)
+        fetch(url, {
+            headers: useAuthStore.getState().token
+                ? { Authorization: `Bearer ${useAuthStore.getState().token!}` }
+                : undefined,
+        })
             .then(async (r) => {
                 if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)
                 return r.text()
@@ -307,7 +374,7 @@ function MarkdownPreview({ url }: { url: string }) {
     return (
         <div style={{ padding: 16, maxHeight: 600, overflow: 'auto' }}>
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={gfmComponents}>
-            {content}
+                {content}
             </ReactMarkdown>
         </div>
     )
@@ -317,19 +384,19 @@ function MarkdownPreview({ url }: { url: string }) {
 interface ChunksQueryResult {
     isLoading: boolean
     data:
+    | {
+        items: DocumentChunkRead[]
+        total: number
+        stats?:
         | {
-              items: DocumentChunkRead[]
-              total: number
-              stats?:
-                  | {
-                        total: number
-                        avg_length: number
-                        min_length: number
-                        max_length: number
-                    }
-                  | null
-          }
-        | undefined
+            total: number
+            avg_length: number
+            min_length: number
+            max_length: number
+        }
+        | null
+    }
+    | undefined
 }
 
 function ChunksSection({
@@ -439,3 +506,63 @@ function ChunkDetailBody({ chunk }: { chunk: DocumentChunkDetail }) {
     )
 }
 
+const TASK_TYPE_LABEL: Record<IngestionTaskRead['task_type'], string> = {
+    ingest: '首次入库',
+    reindex: '增量重建',
+}
+
+const TASK_STATUS_COLOR: Record<IngestionTaskRead['status'], string> = {
+    pending: 'default',
+    running: 'processing',
+    success: 'success',
+    failed: 'error',
+}
+
+const TASK_STATUS_LABEL: Record<IngestionTaskRead['status'], string> = {
+    pending: '排队中',
+    running: '执行中',
+    success: '已完成',
+    failed: '失败',
+}
+
+function IngestionTaskCard({ task }: { task: IngestionTaskRead }) {
+    // pending 阶段还没确定 progress_total，按 0% 展示
+    const percent =
+        task.progress_total > 0
+            ? Math.min(100, Math.round((task.progress_done / task.progress_total) * 100))
+            : 0
+
+    return (
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <Space wrap>
+                <Tag>{TASK_TYPE_LABEL[task.task_type]}</Tag>
+                <Tag color={TASK_STATUS_COLOR[task.status]}>
+                    {TASK_STATUS_LABEL[task.status]}
+                </Tag>
+                <Text type="secondary">
+                    创建于 {new Date(task.created_at).toLocaleString('zh-CN')}
+                </Text>
+            </Space>
+            <Progress
+                percent={percent}
+                status={
+                    task.status === 'failed'
+                        ? 'exception'
+                        : task.status === 'success'
+                            ? 'success'
+                            : 'active'
+                }
+                format={() =>
+                    task.progress_total > 0
+                        ? `${task.progress_done} / ${task.progress_total}`
+                        : task.status === 'success'
+                            ? '完成'
+                            : '等待中'
+                }
+            />
+            {task.error_message ? (
+                <Alert type="error" showIcon message="任务失败" description={task.error_message} />
+            ) : null}
+        </Space>
+    )
+}

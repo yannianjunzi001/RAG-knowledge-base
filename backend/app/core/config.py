@@ -138,10 +138,24 @@ class Settings(BaseSettings):
         return self.rerank_api_key or self.chat_api_key
 
 
+    # ===== Redis（语义缓存 / 限流 / Celery broker，第 12 章引入）=====
+    # 应用直接客户端，不同 db 索引让 Celery broker / backend 互不干扰
+    redis_url: str = "redis://localhost:6379/0"
+    celery_broker_url: str = "redis://localhost:6379/1"
+    celery_result_backend: str = "redis://localhost:6379/2"
+
+    # ===== 语义缓存（第 12 章）=====
+    semantic_cache_enabled: bool = True
+    semantic_cache_ttl_seconds: int = 3600
+    # RedisVL 内部用「余弦距离 = 1 - 余弦相似度」做 KNN 查询，转换在 service 里做
+    semantic_cache_min_similarity: float = 0.92
+
+    # ===== 滑动窗口限流（第 12 章）=====
+    rate_limit_enabled: bool = True
+    rate_limit_per_minute: int = 60
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
 
 settings = get_settings()
-
-

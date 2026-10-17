@@ -1,9 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
+    App as AntdApp,
     Button,
     Popconfirm,
     Select,
+    Form,
+    Modal,
     Space,
     Table,
     Tag,
@@ -12,7 +15,9 @@ import {
     Upload,
     message,
 } from 'antd'
-import type { TableProps, UploadProps } from 'antd'
+import { PermissionTagsField } from '@/components/PermissionTagsField'
+import type { TableProps, } from 'antd'
+import { useAuthStore } from '@/stores/authStore'
 import {
     DeleteOutlined,
     InboxOutlined,
@@ -55,6 +60,11 @@ const DELETABLE_STATUSES: ReadonlySet<DocumentRead['status']> = new Set([
     'uploading',
 ])
 
+interface UploadFormValues {
+    files: any[]
+    permission_tags?: string[]
+}
+
 function formatSize(size: number): string {
     if (size < 1024) return `${size} B`
     if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
@@ -66,6 +76,8 @@ export function DocumentsPage() {
     const [pageSize, setPageSize] = useState(20)
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
     const queryClient = useQueryClient()
+    const [uploadOpen, setUploadOpen] = useState(false)
+    const isAdmin = useAuthStore((s) => Boolean(s.user?.isAdmin))
 
     const listQuery = useQuery({
         queryKey: ['documents', page, pageSize, statusFilter],
@@ -92,8 +104,13 @@ export function DocumentsPage() {
         queryClient.invalidateQueries({ queryKey: ['documents'] })
 
     const uploadMutation = useMutation({
-        mutationFn: async (file: File) => {
-            const res = await uploadDocument({ body: { file } })
+        mutationFn: async ({ file, tags }: { file: File; tags: string[] }) => {
+            const res = await uploadDocument({
+                body: {
+                    file,
+                    permission_tags: tags.length > 0 ? JSON.stringify(tags) : null,
+                },
+            })
             return res.data!
         },
         onSuccess: (doc) => {
@@ -124,19 +141,9 @@ export function DocumentsPage() {
         },
     })
 
-    const uploadProps: UploadProps = useMemo(
-        () => ({
-            multiple: true,
-            accept: ACCEPTED,
-            showUploadList: false,
-            customRequest: ({ file }) => {
-                uploadMutation.mutate(file as File)
-            },
-        }),
-        [uploadMutation],
-    )
 
-    const columns: TableProps<DocumentRead>['columns'] = [
+
+    const baseColumns: TableProps<DocumentRead>['columns'] = [
         {
             title: '文档名',
             dataIndex: 'name',
@@ -145,6 +152,14 @@ export function DocumentsPage() {
         },
         { title: '类型', dataIndex: 'mime_type', width: 220, ellipsis: true },
         { title: '大小', dataIndex: 'size', width: 110, render: formatSize },
+        
+        {
+            title: '版本',
+            dataIndex: 'version',
+            width: 80,
+            render: (version: number) => <Tag color="purple">v{version}</Tag>,
+        },
+        
         {
             title: '状态',
             dataIndex: 'status',
@@ -159,7 +174,28 @@ export function DocumentsPage() {
             width: 200,
             render: (value: string) => new Date(value).toLocaleString('zh-CN'),
         },
+
         {
+            title: '权限标签',
+            dataIndex: 'permission_tags',
+            width: 200,
+            render: (tags: string[]) =>
+                tags.length === 0 ? (
+                    <Tag>公开</Tag>
+                ) : (
+                    <Space size={4} wrap>
+                        {tags.map((t) => (
+                            <Tag color={t === '*' ? 'gold' : 'blue'} key={t}>
+                                {t}
+                            </Tag>
+                        ))}
+                    </Space>
+                ),
+        },
+    ]
+    const columns = [...baseColumns]
+    if (isAdmin) {
+        columns.push({
             title: '操作',
             key: 'actions',
             width: 180,
@@ -206,9 +242,8 @@ export function DocumentsPage() {
                     </Space>
                 )
             },
-        },
-    ]
-
+        })
+    }
     return (
         <div>
             <Title level={3}>文档管理</Title>
@@ -216,15 +251,13 @@ export function DocumentsPage() {
                 支持 PDF、DOCX、Markdown、HTML。上传后后台异步完成解析、切分、向量化与入库，状态实时更新。
             </Paragraph>
             <Space style={{ marginBottom: 16 }} wrap>
-                <Upload {...uploadProps}>
-                    <Button
-                        type="primary"
-                        icon={<InboxOutlined />}
-                        loading={uploadMutation.isPending}
-                    >
-                        上传文档
-                    </Button>
-                </Upload>
+                <Button
+                    type="primary"
+                    icon={<InboxOutlined />}
+                    onClick={() => setUploadOpen(true)}
+                >
+                    上传文档
+                </Button>
                 <Button
                     icon={<ReloadOutlined />}
                     onClick={() => listQuery.refetch()}
@@ -258,6 +291,64 @@ export function DocumentsPage() {
                     },
                 }}
             />
+            <UploadModal
+                open={uploadOpen}
+                onClose={() => setUploadOpen(false)}
+                onUpload={(file, tags) => uploadMutation.mutate({ file, tags })}
+            />
         </div>
+    )
+}
+
+function UploadModal({ open, onClose, onUpload }: { open: boolean; onClose: () => void; onUpload: (file: File, tags: string[]) => void }) {
+    const [form] = Form.useForm<UploadFormValues>()
+    const { message } = AntdApp.useApp()
+
+    const uploadProps = {
+        multiple: false,
+        accept: ACCEPTED,
+        maxCount: 1,
+        beforeUpload: () => false, // 用 form 控制提交，不让 Upload 自动上传
+    }
+
+    const handleOk = async () => {
+        try {
+            const values = await form.validateFields()
+            const file = values.files?.[0]?.originFileObj as File | undefined
+            if (!file) {
+                message.error('请先选择文件')
+                return
+            }
+            onUpload(file, values.permission_tags ?? [])
+            form.resetFields()
+            onClose()
+        } catch {
+            // 校验失败
+        }
+    }
+
+    return (
+        <Modal title="上传文档" open={open} onCancel={onClose} onOk={handleOk} destroyOnHidden>
+            <Form<UploadFormValues> form={form} layout="vertical">
+                <Form.Item
+                    name="files"
+                    label="选择文件"
+                    valuePropName="fileList"
+                    getValueFromEvent={(e) => (Array.isArray(e) ? e : e?.fileList)}
+                    rules={[{ required: true, message: '请选择文件' }]}
+                >
+                    <Upload {...uploadProps}>
+                        <Button icon={<InboxOutlined />}>点击选择文件</Button>
+                    </Upload>
+                </Form.Item>
+                <Form.Item
+                    name="permission_tags"
+                    label="权限标签"
+                    extra="留空视为公开（所有登录用户可见）；填入后仅拥有匹配标签的角色可见"
+                >
+                    <PermissionTagsField placeholder='例如: hr、sales、"public"' />
+                </Form.Item>
+            </Form>
+        </Modal>
     )
 }

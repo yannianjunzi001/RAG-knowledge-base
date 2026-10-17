@@ -148,6 +148,10 @@ class MessageRead(BaseModel):
     verify_result: VerifyResultRead | None = None
     trace_id: str | None = None
     trace_url: str | None = None
+    trace_url: str | None = None
+    # 语义缓存：True 表示本条 assistant 消息来自缓存命中（跳过了图和 LLM）
+    cache_hit: bool = False
+
 
 
 
@@ -162,6 +166,7 @@ class MessageRead(BaseModel):
             created_at=message.created_at,
             trace_id=trace_id,
             trace_url=build_trace_url(trace_id),
+            cache_hit=_parse_cache_hit(message.extra_metadata) if is_assistant else False,
 
             citations=[CitationRead.from_orm(c) for c in message.citations]
             if is_assistant
@@ -230,6 +235,16 @@ def _parse_verify_result(metadata: dict | None) -> VerifyResultRead | None:
         return VerifyResultRead.model_validate(raw)
     except Exception:
         return None
+
+def _parse_cache_hit(metadata: dict | None) -> bool:
+    """从 messages.extra_metadata 中提取 cache_hit 标记。
+
+    历史消息没有该字段，按 False 处理。
+    """
+    if not metadata:
+        return False
+    raw = metadata.get("cache_hit")
+    return bool(raw)
 
 class ConversationDetail(BaseModel):
     """会话详情：会话本身 + 历史消息（含引用）。"""

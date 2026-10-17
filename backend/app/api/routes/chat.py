@@ -5,7 +5,7 @@ from fastapi import APIRouter, Query, Response
 from fastapi.responses import EventSourceResponse
 from fastapi.sse import ServerSentEvent
 
-from app.api.deps import DbSession,CurrentUser
+from app.api.deps import DbSession,CurrentUser,RateLimited
 from app.api.schemas.chat import (
     ChatRequest,
     ConversationCreate,
@@ -65,6 +65,7 @@ async def stream_chat(
     conversation_id: UUID,
     payload: ChatRequest,
     session: DbSession,
+    _rate_limit: RateLimited,
 ) -> AsyncIterable[ServerSentEvent]:
     """SSE 流式问答。
 

@@ -51,7 +51,6 @@ class HybridRetriever:
 
     @staticmethod
     async def _safe_search(
-        self,
         retriever_cls: type[VectorRetriever] | type[KeywordRetriever],
         query: str,
         top_k: int,

@@ -1,5 +1,6 @@
 import { fetchEventSource } from '@microsoft/fetch-event-source'
 import type { AgentStep,CitationRead,QueryRouteRead } from '@/client/types.gen'
+import { getAuthToken, useAuthStore } from '@/stores/authStore'
 
 export interface ChatStartEvent {
     type: 'start'
@@ -7,6 +8,8 @@ export interface ChatStartEvent {
     traceId: string | null
     /** LangSmith UI 跳转 URL; 后端按 LANGSMITH_RUN_URL_PREFIX 拼好下发，未配置时为 null */
     traceUrl: string | null
+    /** 语义缓存：true 表示本次回答来自缓存命中，跳过了图与 LLM */
+    cacheHit: boolean
 }
 
 export interface ChatQueryRouteEvent {
@@ -78,16 +81,34 @@ export async function streamChat({
     signal,
     onEvent,
 }: StreamChatParams): Promise<void> {
+
+    const token = getAuthToken()
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (token) {
+        headers.Authorization = `Bearer ${token}`
+    }
+
     await fetchEventSource(
         `/api/conversations/${conversationId}/chat`,
         {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify({ question }),
             signal,
             // 默认会在 tab 切换到后台时关闭连接，问答场景不希望中断
             openWhenHidden: true,
             async onopen(response) {
+
+                // 401 时与全局 HTTP 拦截器对齐：清登录态 + 跳登录页
+                if (response.status === 401) {
+                    useAuthStore.getState().logout()
+                    if (window.location.pathname !== '/login') {
+                        const back = window.location.pathname + window.location.search
+                        window.location.replace(`/login?back=${encodeURIComponent(back)}`)
+                    }
+                    throw new FatalSseError('请先登录')
+                }
+
                 if (response.ok && response.headers.get('content-type')?.includes('text/event-stream')) {
                     return
                 }
@@ -103,6 +124,7 @@ export async function streamChat({
                             type: 'start' ,
                             traceId: data.trace_id ?? null,
                             traceUrl: data.trace_url ?? null,
+                            cacheHit: Boolean(data.cache_hit),
                         })
                         break
                     case 'query_route':

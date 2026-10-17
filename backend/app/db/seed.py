@@ -29,6 +29,15 @@ async def seed_default_admin() -> None:
     """库内无用户时建 admin 角色 + user 角色 + admin 用户（关联 admin 角色）"""
     async with AsyncSessionLocal() as session:
         user_repo = UserRepository(session)
+        # 强制确保 admin 用户存在，且密码被重置为默认密码
+        # 这样即使之前修改过密码，重启后也能用 admin/admin 登录
+        admin_user = await user_repo.get_by_username(settings.default_admin_username)
+        if admin_user is not None:
+            admin_user.password_hash = hash_password(settings.default_admin_password)
+            await session.commit()
+            logger.info("admin password reset to default")
+            return
+
         if await user_repo.count_all() > 0:
             return
 

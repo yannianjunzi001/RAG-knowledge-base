@@ -7,6 +7,8 @@ import { RouterProvider } from 'react-router-dom'
 import { router } from '@/routes'
 import 'antd/dist/reset.css'
 import '@/api/client'
+import { useAuthStore } from '@/stores/authStore'
+
 
 const queryClient = new  QueryClient({
   defaultOptions: {
@@ -20,6 +22,8 @@ const queryClient = new  QueryClient({
 
 const root = document.getElementById('root')
 if (!root) throw new Error ('root element not found')
+
+  useAuthStore.getState().hydrate()
 
   createRoot(root).render(
     <StrictMode>
