@@ -493,7 +493,7 @@ function MessageBubble({ message }: MessageBubbleProps) {
                 }}
             >
                 {message.error ? (
-                    <Alert type="error" message={message.error} style={{ marginBottom: 8 }} />
+                    <Alert type="error" message={formatErrorMessage(message.error)} style={{ marginBottom: 8 }} />
                 ) : null}
                 {!isUser ? <AssistantHeader message={message} /> : null}
                 {message.content ? (
@@ -525,4 +525,20 @@ function MessageBubble({ message }: MessageBubbleProps) {
             </div>
         </div>
     )
+}
+
+/** 解析后端传来的错误信息，如果是 JSON 则提取 message 字段，否则原样返回 */
+function formatErrorMessage(raw:string|null|undefined): string{
+    if(!raw)return '请求失败'
+    try{
+        const parsed = JSON.parse(raw)
+        //如果解析出来是个对象，并且里面有 message 字段，就返回它
+        if(parsed&&typeof parsed ==='object' &&typeof parsed.message ==='string'){
+            return parsed.message
+        }
+        return raw
+    }catch{
+         // 如果 JSON.parse 报错，说明它本来就是个普通的字符串（比如 "Network Error"），直接返回原样
+         return raw
+    }
 }
